@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Fixed fatal crash when service outage returns invalid device query response without `docs` property
+- Fixed connection storm during outages - prevented hundreds of parallel reconnection attempts
+- Fixed memory leaks from WebSocket event listeners not being cleaned up during reconnection
+- Fixed addon exiting on errors instead of recovering via reconnection logic
+- Added exponential backoff for reconnection attempts (30s → 60s → 120s → 240s → 300s max)
+- Added proper WebSocket cleanup with new `disconnect()` method
+- Added global uncaught exception and unhandled rejection handlers to prevent process crashes
+- Increased WebSocket max listeners to 20 to handle reconnection scenarios without warnings
+
+### Changed
+- Startup failures now trigger reconnection instead of exiting the process
+- Gateway stays running during failures and automatically recovers when service is restored
+
 ## [1.1.0] - 2026-01-24
 
 ### Fixed
