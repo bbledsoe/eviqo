@@ -129,6 +129,18 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  // Handle uncaught exceptions and unhandled rejections to prevent crashes
+  process.on('uncaughtException', (error) => {
+    logger.error(`Uncaught exception: ${error}`);
+    logger.error('Stack trace:', error.stack);
+    // Don't exit - let the reconnection logic handle recovery
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error(`Unhandled rejection at ${promise}: ${reason}`);
+    // Don't exit - let the reconnection logic handle recovery
+  });
+
   // Handle state changes
   gateway.on('stateChange', (state) => {
     logger.info(`Gateway state: ${state}`);
@@ -137,18 +149,18 @@ async function main(): Promise<void> {
   // Start the gateway
   try {
     await gateway.start();
-
     logger.info('Gateway is running. Press Ctrl+C to stop.');
-
-    // Keep the process alive
-    await new Promise(() => {
-      // This promise never resolves, keeping the process running
-      // The shutdown handlers will terminate the process
-    });
   } catch (error) {
-    logger.error(`Gateway error: ${error}`);
-    process.exit(1);
+    logger.error(`Initial gateway start failed: ${error}`);
+    logger.info('Gateway will attempt to reconnect automatically...');
+    // Don't exit - the gateway's reconnection logic will handle recovery
   }
+
+  // Keep the process alive
+  await new Promise(() => {
+    // This promise never resolves, keeping the process running
+    // The shutdown handlers will terminate the process
+  });
 }
 
 // Run main function

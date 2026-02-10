@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Added `disconnect()` method for proper WebSocket cleanup and resource management
+- Added validation for device query responses to handle service outages gracefully
+
+### Fixed
+- Fixed fatal crash when service outage returns invalid response without `docs` property in `queryDevices()`
+- Fixed memory leaks from WebSocket event listeners accumulating during reconnection attempts
+- Increased WebSocket max listeners to 20 to prevent warnings during reconnection scenarios
+
 ## [1.0.0] - 2024-12-24
 
 ### Added

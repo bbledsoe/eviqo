@@ -62,6 +62,8 @@ export class EviqoMqttGateway extends EventEmitter {
   private state: GatewayState = 'disconnected';
   private reconnectTimer: NodeJS.Timeout | null = null;
   private shutdownRequested = false;
+  private isReconnecting = false;
+  private reconnectAttempts = 0;
   // Map command topics to device/pin info for handling MQTT commands
   private commandTopicMap: Map<string, { deviceId: string; pin: string }> =
     new Map();
@@ -115,6 +117,7 @@ export class EviqoMqttGateway extends EventEmitter {
       await this.connectEviqo();
 
       this.setState('connected');
+      this.reconnectAttempts = 0; // Reset backoff on successful connection
       logger.info('Gateway started successfully');
 
       // Start monitoring loop
@@ -122,7 +125,12 @@ export class EviqoMqttGateway extends EventEmitter {
     } catch (error) {
       logger.error(`Failed to start gateway: ${error}`);
       this.setState('error');
-      throw error;
+
+      // Don't throw - schedule reconnection instead
+      if (!this.shutdownRequested) {
+        logger.info('Scheduling reconnection after startup failure...');
+        this.scheduleReconnect();
+      }
     }
   }
 
@@ -155,8 +163,12 @@ export class EviqoMqttGateway extends EventEmitter {
       this.mqttClient = null;
     }
 
-    // The Eviqo client will close when the connection ends
-    this.eviqoClient = null;
+    // Disconnect from Eviqo properly
+    if (this.eviqoClient) {
+      this.eviqoClient.removeAllListeners();
+      this.eviqoClient.disconnect();
+      this.eviqoClient = null;
+    }
 
     this.setState('disconnected');
     logger.info('Gateway stopped');
@@ -417,29 +429,62 @@ export class EviqoMqttGateway extends EventEmitter {
   }
 
   /**
-   * Schedule a reconnection attempt
-   * @param delay - Delay in ms before reconnecting (default: 30000ms)
+   * Schedule a reconnection attempt with exponential backoff
+   * @param delay - Optional delay override in ms (for immediate reconnect use 0)
    */
-  private scheduleReconnect(delay = 30000): void {
+  private scheduleReconnect(delay?: number): void {
     if (this.shutdownRequested) return;
 
-    if (delay > 0) {
-      logger.info(`Scheduling reconnection in ${delay / 1000} seconds...`);
+    // Prevent multiple parallel reconnection attempts
+    if (this.isReconnecting) {
+      logger.debug('Reconnection already in progress, ignoring request');
+      return;
+    }
+
+    // Clear any existing reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Clean up old connection
+    if (this.eviqoClient) {
+      this.eviqoClient.removeAllListeners();
+      this.eviqoClient.disconnect();
+      this.eviqoClient = null;
+    }
+
+    // Calculate exponential backoff delay if not explicitly provided
+    // Base delay: 30s, doubles each attempt, capped at 5 minutes
+    let actualDelay = delay;
+    if (actualDelay === undefined) {
+      const baseDelay = 30000; // 30 seconds
+      const maxDelay = 300000; // 5 minutes
+      actualDelay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
+      this.reconnectAttempts++;
+    }
+
+    if (actualDelay > 0) {
+      logger.info(`Scheduling reconnection in ${actualDelay / 1000} seconds (attempt ${this.reconnectAttempts})...`);
     } else {
       logger.info('Reconnecting now...');
     }
     this.setState('connecting');
+    this.isReconnecting = true;
 
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connectEviqo();
         this.setState('connected');
+        this.isReconnecting = false;
+        this.reconnectAttempts = 0; // Reset backoff on success
         this.monitorLoop();
       } catch (error) {
         logger.error(`Reconnection failed: ${error}`);
+        this.isReconnecting = false;
         this.scheduleReconnect();
       }
-    }, delay);
+    }, actualDelay);
   }
 
   /**

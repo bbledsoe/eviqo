@@ -115,6 +115,9 @@ export class EviqoWebsocketConnection extends EventEmitter {
 
       this.ws = new WebSocket(this.url, { headers });
 
+      // Increase max listeners to prevent warnings during reconnection attempts
+      this.ws.setMaxListeners(20);
+
       // Set up event handlers
       return new Promise<boolean>((resolve, reject) => {
         if (!this.ws) {
@@ -265,6 +268,12 @@ export class EviqoWebsocketConnection extends EventEmitter {
 
     const { payload } = await this.listen();
     const deviceResponse = payload as unknown as EviqoDeviceQueryModel;
+
+    // Guard against invalid response during service outages
+    if (!deviceResponse || !deviceResponse.docs || !Array.isArray(deviceResponse.docs)) {
+      logger.error(`Invalid device query response: ${JSON.stringify(deviceResponse)}`);
+      throw new Error('Invalid device query response - docs property missing or not iterable');
+    }
 
     for (const device of deviceResponse.docs) {
       const deviceDetails = device[1] as DeviceDocs;
@@ -665,5 +674,26 @@ export class EviqoWebsocketConnection extends EventEmitter {
    */
   isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Disconnect and clean up WebSocket connection
+   */
+  disconnect(): void {
+    if (this.ws) {
+      try {
+        // Remove all listeners to prevent memory leaks
+        this.ws.removeAllListeners();
+
+        // Close the connection if it's still open
+        if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+          this.ws.close();
+        }
+      } catch (error) {
+        logger.error(`Error during disconnect: ${error}`);
+      } finally {
+        this.ws = null;
+      }
+    }
   }
 }
