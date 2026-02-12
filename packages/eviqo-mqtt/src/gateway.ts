@@ -492,13 +492,13 @@ export class EviqoMqttGateway extends EventEmitter {
    *
    * Handles topic construction, value transformation, and retain logic.
    * Publishes values for widgets in WIDGET_MAPPINGS (sensors) or CONTROLLABLE_WIDGETS (number entities).
-   * @param retain - Whether to retain the message (defaults to false for updates, true for initial values)
+   * @param retain - Whether to retain the message (defaults to true per HA best practices)
    */
   private publishWidgetValue(
     deviceId: string | number,
     widgetName: string,
     rawValue: string,
-    retain = false
+    retain = true
   ): void {
     if (!this.mqttClient || !this.mqttClient.connected) return;
 
@@ -712,7 +712,7 @@ export class EviqoMqttGateway extends EventEmitter {
       const sensorId = getTopicId(sessionEntity);
       const sessionTopic = `${this.config.topicPrefix}/${deviceId}/${sensorId}/state`;
       const resetValue = resetValues[sessionEntity] || '0';
-      this.mqttClient.publish(sessionTopic, resetValue, { retain: false });
+      this.mqttClient.publish(sessionTopic, resetValue, { retain: true });
     }
   }
 
@@ -730,7 +730,7 @@ export class EviqoMqttGateway extends EventEmitter {
     // Publish optimistic state immediately
     if (this.mqttClient && this.mqttClient.connected) {
       const chargingTopic = `${this.config.topicPrefix}/${deviceId}/charging/state`;
-      this.mqttClient.publish(chargingTopic, desiredState, { retain: false });
+      this.mqttClient.publish(chargingTopic, desiredState, { retain: true });
       logger.debug(`Published optimistic charging state ${desiredState} for device ${deviceId}`);
     }
   }
@@ -750,12 +750,11 @@ export class EviqoMqttGateway extends EventEmitter {
     }
 
     logger.debug(`Updating state after command: ${stateTopic} = ${command.value}`);
-    this.mqttClient.publish(stateTopic, command.value, { retain: false });
+    this.mqttClient.publish(stateTopic, command.value, { retain: true });
   }
 
   /**
    * Publish initial widget values for a device
-   * Initial values are retained so HA can pick them up after a restart
    */
   private async publishInitialWidgetValues(device: EviqoDevicePageModel): Promise<void> {
     const dashboard = device.dashboard;
@@ -764,8 +763,7 @@ export class EviqoMqttGateway extends EventEmitter {
       for (const module of widget.modules) {
         for (const stream of module.displayDataStreams) {
           const rawValue = stream.visualization.value || '0';
-          // Retain initial values so HA can see them after restart
-          this.publishWidgetValue(device.id, stream.name, rawValue, true);
+          this.publishWidgetValue(device.id, stream.name, rawValue);
         }
       }
     }
