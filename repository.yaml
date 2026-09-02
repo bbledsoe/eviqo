@@ -1,4 +1,4 @@
 # Home Assistant Add-on Repository
-name: Eviqo MQTT Add-ons
-url: https://github.com/tsightler/eviqo
-maintainer: tsightler
+name: Eviqo MQTT Handshake Test
+url: https://github.com/bbledsoe/eviqo/tree/handshake-test
+maintainer: bbledsoe
