@@ -1,6 +1,6 @@
 # Home Assistant Add-on Configuration
 name: Eviqo MQTT Dev
-version: "1.2.1-handshake.1"
+version: "1.2.1-handshake.2"
 slug: eviqo-mqtt-dev
 description: >-
   Development build for testing the current Eviqo web startup handshake.
