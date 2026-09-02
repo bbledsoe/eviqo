@@ -7,6 +7,7 @@
 
 import * as dotenv from 'dotenv';
 import { logger, LogLevel } from 'eviqo-client-api';
+import './protocol-patch';
 import { loadConfig } from './config';
 import { EviqoMqttGateway } from './gateway';
 
