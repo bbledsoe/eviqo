@@ -1,18 +1,18 @@
 # Home Assistant Add-on Configuration
-name: Eviqo MQTT
-version: "1.2.1"
-slug: eviqo-mqtt
+name: Eviqo MQTT Dev
+version: "1.2.1-handshake.1"
+slug: eviqo-mqtt-dev
 description: >-
-  Bridges Eviqo EV charger data to MQTT with Home Assistant auto-discovery.
-  Exposes charging status, power, voltage, and session data as Home Assistant entities.
-url: https://github.com/tsightler/eviqo
+  Development build for testing the current Eviqo web startup handshake.
+  Based on the upstream Eviqo MQTT add-on with protocol-only changes.
+url: https://github.com/bbledsoe/eviqo/tree/handshake-test
 arch:
   - amd64
   - aarch64
   - armv7
   - armhf
 startup: application
-boot: auto
+boot: manual
 services:
   - mqtt:need
 options:
@@ -25,5 +25,4 @@ schema:
   eviqo_password: password
   mqtt_url: str?
   debug: bool?
-image: ghcr.io/tsightler/eviqo-mqtt-{arch}
 init: false
