@@ -584,8 +584,9 @@ export class EviqoWebsocketConnection extends EventEmitter {
     description = ''
   ): Promise<void> {
     if (this.ws === null) {
-      logger.error('Error sending, websocket not created');
-      return;
+      const error = new Error('Cannot send message: websocket not created');
+      logger.error(error.message);
+      throw error;
     }
 
     try {
@@ -601,6 +602,7 @@ export class EviqoWebsocketConnection extends EventEmitter {
       this.ws.send(message);
     } catch (error) {
       logger.error(`Error sending message: ${error}`);
+      throw error;
     }
   }
 
