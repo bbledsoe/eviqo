@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - handshake-test
+  pull_request:
+    branches:
+      - handshake-test
   workflow_dispatch:
 
 jobs:
