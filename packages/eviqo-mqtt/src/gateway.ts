@@ -73,11 +73,11 @@ export class EviqoMqttGateway extends EventEmitter {
   private deviceStatus: Map<string, string> = new Map();
   // Map charging command topics to device IDs
   private chargingCommandTopicMap: Map<string, string> = new Map();
-  // Track pending charging state per device for optimistic updates
-  // When a command is sent, we block real state updates until desired state is reached or timeout
-  private pendingChargingState: Map<string, { desiredState: 'ON' | 'OFF'; expiresAt: number }> = new Map();
-  // Timeout for pending state (ms) - after this, real state updates are allowed again
-  private static readonly PENDING_STATE_TIMEOUT = 5000;
+  // Incremented for every real Status widget update, including initial discovery.
+  // Charging command verification requires a newer revision than the one observed
+  // before the command so cached state can never count as confirmation.
+  private statusRevision: Map<string, number> = new Map();
+  private static readonly CHARGING_CONFIRM_TIMEOUT = 15000;
   // Track when the Eviqo websocket connection was established (for periodic reconnection)
   private lastEviqoConnectTime: number = 0;
 
@@ -532,35 +532,16 @@ export class EviqoMqttGateway extends EventEmitter {
 
     // If this is Status, track the status and update the charging switch
     if (widgetName === 'Status') {
-      // Track status for charging control logic
-      this.deviceStatus.set(String(deviceId), rawValue);
+      // Track only real EVIQO status. Never make the HA charging switch
+      // optimistic: ON means EVIQO actually reported status=2 (charging).
+      const statusKey = String(deviceId);
+      this.deviceStatus.set(statusKey, rawValue);
+      this.statusRevision.set(statusKey, (this.statusRevision.get(statusKey) || 0) + 1);
 
       const chargingTopic = `${this.config.topicPrefix}/${deviceId}/charging/state`;
       const isCharging = rawValue === '2'; // 2 = charging
       const realState = isCharging ? 'ON' : 'OFF';
-
-      // Check if there's a pending state for this device
-      const pending = this.pendingChargingState.get(String(deviceId));
-      if (pending) {
-        const now = Date.now();
-        if (realState === pending.desiredState) {
-          // Desired state reached - clear pending and publish
-          logger.debug(`Charging state reached desired state ${realState} for device ${deviceId}`);
-          this.pendingChargingState.delete(String(deviceId));
-          this.mqttClient.publish(chargingTopic, realState, { retain });
-        } else if (now >= pending.expiresAt) {
-          // Timeout expired - clear pending and publish real state
-          logger.warn(`Pending charging state timed out for device ${deviceId}, publishing real state ${realState}`);
-          this.pendingChargingState.delete(String(deviceId));
-          this.mqttClient.publish(chargingTopic, realState, { retain });
-        } else {
-          // Still pending - skip this update
-          logger.debug(`Blocking charging state update for device ${deviceId}, pending ${pending.desiredState}`);
-        }
-      } else {
-        // No pending state - publish normally
-        this.mqttClient.publish(chargingTopic, realState, { retain });
-      }
+      this.mqttClient.publish(chargingTopic, realState, { retain });
     }
   }
 
@@ -621,75 +602,113 @@ export class EviqoMqttGateway extends EventEmitter {
   /**
    * Handle charging switch command (ON/OFF)
    *
-   * Command sequences based on current status (with 25ms delays between commands):
-   * - To STOP (status=2 charging): send 2, then 0
-   * - To START (status=1 plugged): send 1, then 0
-   * - To START (status=3 stopped): send 3, then 0, then 1, then 0
+   * Cached Status is advisory only. Explicit charging commands are directional,
+   * so a stale "unplugged" or "charging" value must not suppress the command.
    *
-   * Uses optimistic state updates - immediately publishes desired state and blocks
-   * real state updates until the desired state is reached or timeout expires.
+   * After sending a command, require a NEW EVIQO Status widget update that
+   * confirms the requested state. If no fresh confirmation arrives, reconnect
+   * the EVIQO websocket so the next HA retry operates from a fresh device query.
    */
   private async handleChargingCommand(deviceId: string, command: string): Promise<void> {
     const currentStatus = this.deviceStatus.get(deviceId);
+    const statusRevisionBefore = this.statusRevision.get(deviceId) || 0;
     const chargingPin = '15'; // Pin for charging control
     const delay = () => new Promise(resolve => setTimeout(resolve, 25));
 
-    logger.info(`Charging command: ${command} for device ${deviceId} (current status: ${currentStatus})`);
+    logger.info(`Charging command: ${command} for device ${deviceId} (cached status: ${currentStatus})`);
 
     try {
       if (command === 'OFF') {
-        // Stop charging - only valid if currently charging (status=2)
-        if (currentStatus !== '2') {
-          logger.warn(`Cannot stop charging: device ${deviceId} is not charging (status=${currentStatus})`);
-          return;
-        }
+        // Stop is directional and safe to reassert even if cached state is stale.
         await this.eviqoClient!.sendCommand(deviceId, chargingPin, '2');
         await delay();
         await this.eviqoClient!.sendCommand(deviceId, chargingPin, '0');
-        // Set optimistic state
-        this.setOptimisticChargingState(deviceId, 'OFF');
-        logger.info(`Charging stopped for device ${deviceId}`);
+
+        const confirmed = await this.waitForFreshChargingState(
+          deviceId,
+          false,
+          statusRevisionBefore
+        );
+        if (!confirmed) {
+          logger.warn(
+            `Charging stop not confirmed by fresh EVIQO status for device ${deviceId}; forcing websocket reconnect`
+          );
+          this.scheduleReconnect(0);
+          return;
+        }
+
+        logger.info(`Charging stop confirmed for device ${deviceId}`);
       } else if (command === 'ON') {
-        // Start charging - depends on current status
-        if (currentStatus === '0') {
-          logger.warn(`Cannot start charging: device ${deviceId} is unplugged`);
-          return;
-        } else if (currentStatus === '2') {
-          logger.info(`Device ${deviceId} is already charging`);
-          return;
-        } else if (currentStatus === '1') {
-          // Plugged - send start command
-          await this.eviqoClient!.sendCommand(deviceId, chargingPin, '1');
-          await delay();
-          await this.eviqoClient!.sendCommand(deviceId, chargingPin, '0');
-          // Reset session entities to zero immediately
-          this.resetSessionEntities(deviceId);
-          // Set optimistic state
-          this.setOptimisticChargingState(deviceId, 'ON');
-          logger.info(`Charging started for device ${deviceId}`);
-        } else if (currentStatus === '3') {
-          // Stopped - need to unlock then start
+        if (currentStatus === '3') {
+          // Known stopped state requires unlock before start.
           await this.eviqoClient!.sendCommand(deviceId, chargingPin, '3');
           await delay();
           await this.eviqoClient!.sendCommand(deviceId, chargingPin, '0');
           await delay();
-          await this.eviqoClient!.sendCommand(deviceId, chargingPin, '1');
-          await delay();
-          await this.eviqoClient!.sendCommand(deviceId, chargingPin, '0');
-          // Reset session entities to zero immediately
-          this.resetSessionEntities(deviceId);
-          // Set optimistic state
-          this.setOptimisticChargingState(deviceId, 'ON');
-          logger.info(`Charging started for device ${deviceId} (from stopped state)`);
-        } else {
-          logger.warn(`Unknown status ${currentStatus} for device ${deviceId}`);
+        } else if (currentStatus !== '1') {
+          logger.warn(
+            `Starting device ${deviceId} despite cached status ${currentStatus ?? 'unknown'}; cached telemetry may be stale`
+          );
         }
+
+        // Reassert start even when cached status says unplugged/already charging.
+        // A truly unplugged EVSE will simply fail confirmation; stale telemetry
+        // can no longer prevent the start command from reaching EVIQO.
+        await this.eviqoClient!.sendCommand(deviceId, chargingPin, '1');
+        await delay();
+        await this.eviqoClient!.sendCommand(deviceId, chargingPin, '0');
+
+        const confirmed = await this.waitForFreshChargingState(
+          deviceId,
+          true,
+          statusRevisionBefore
+        );
+        if (!confirmed) {
+          logger.warn(
+            `Charging start not confirmed by fresh EVIQO status for device ${deviceId}; forcing websocket reconnect`
+          );
+          this.scheduleReconnect(0);
+          return;
+        }
+
+        this.resetSessionEntities(deviceId);
+        logger.info(`Charging start confirmed for device ${deviceId}`);
       } else {
         logger.warn(`Unknown charging command: ${command}`);
       }
     } catch (error) {
       logger.error(`Failed to send charging command: ${error}`);
+      if (!this.shutdownRequested) {
+        this.scheduleReconnect(0);
+      }
     }
+  }
+
+  /**
+   * Wait for a post-command Status update that confirms the requested charging
+   * state. Cached state from before the command is intentionally ignored.
+   */
+  private async waitForFreshChargingState(
+    deviceId: string,
+    shouldBeCharging: boolean,
+    revisionBefore: number,
+    timeoutMs = EviqoMqttGateway.CHARGING_CONFIRM_TIMEOUT
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const revision = this.statusRevision.get(deviceId) || 0;
+      if (revision > revisionBefore) {
+        const isCharging = this.deviceStatus.get(deviceId) === '2';
+        if (isCharging === shouldBeCharging) {
+          return true;
+        }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    return false;
   }
 
   /**
@@ -713,25 +732,6 @@ export class EviqoMqttGateway extends EventEmitter {
       const sessionTopic = `${this.config.topicPrefix}/${deviceId}/${sensorId}/state`;
       const resetValue = resetValues[sessionEntity] || '0';
       this.mqttClient.publish(sessionTopic, resetValue, { retain: true });
-    }
-  }
-
-  /**
-   * Set optimistic charging state and publish immediately
-   * Blocks real state updates until desired state is reached or timeout expires
-   */
-  private setOptimisticChargingState(deviceId: string, desiredState: 'ON' | 'OFF'): void {
-    // Set pending state with expiration
-    this.pendingChargingState.set(deviceId, {
-      desiredState,
-      expiresAt: Date.now() + EviqoMqttGateway.PENDING_STATE_TIMEOUT,
-    });
-
-    // Publish optimistic state immediately
-    if (this.mqttClient && this.mqttClient.connected) {
-      const chargingTopic = `${this.config.topicPrefix}/${deviceId}/charging/state`;
-      this.mqttClient.publish(chargingTopic, desiredState, { retain: true });
-      logger.debug(`Published optimistic charging state ${desiredState} for device ${deviceId}`);
     }
   }
 
